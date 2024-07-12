@@ -1,0 +1,173 @@
+import time
+import numpy as np
+import matplotlib.pyplot as plt
+from scipy.stats import binom
+from scipy.optimize import minimize
+import math
+
+def offline(budget, K, n):
+    cost = 0  # initial DR cost
+    quantum = 1  # initial quantum
+
+    # initial compensation array
+    C = np.zeros(n)
+
+    while cost < budget:
+        d = 0
+        largest_index = 0
+
+        while d < n:
+            if jump(K[d], C[d]) >= jump(K[largest_index], C[largest_index]):
+                largest_index = d
+            d += 1
+
+        C[largest_index] += quantum
+        cost += quantum
+
+    return C
+
+def jump(k, c):
+    return (1 - np.exp(-k * (c + 1))) - (1 - np.exp(-k * c))
+
+def estimate_lambda_ls(success_hist, offered_hist, n, number_of_discounts, t):   ##n=number of agent, number_of_discount =c
+    prob = np.ones(number_of_discounts)
+    lambda_estimate = np.ones(n)
+    lambda_plus = np.ones(n)
+    
+    for i in range(n):
+        lambda_max = 0
+        lambda_min = 5.0
+        lambda_estimate_i = 0.6 * np.ones(number_of_discounts)
+        
+        for j in range(number_of_discounts):
+            if offered_hist[i, j] != 0:
+                prob[j] = success_hist[i, j] / offered_hist[i, j]
+                lambda_estimate_i[j] = max(0.00000001, -np.log(1 - prob[j] + 0.00000001) / (j + 1))
+                
+                if lambda_estimate_i[j] > lambda_max:
+                    lambda_max = lambda_estimate_i[j]
+                if lambda_estimate_i[j] < lambda_min:
+                    lambda_min = lambda_estimate_i[j]
+        
+        err = 500000000.0
+        
+        def error_function(k, prob, number_of_discounts):
+            temp_err = 0.0
+            for j in range(number_of_discounts):
+                temp_err += (prob[j] - (1 - np.exp(-k * (j + 1))))**2
+            return temp_err
+        
+#         if t in [100, 1000, 10000, 100000, 1000000, 5000000]:
+                
+#             result = minimize(error_function, x0=0.5, args=(prob, number_of_discounts), bounds=[(0.01, 1.0)], method='L-BFGS-B')
+#             lambda_estimate[i] = result.x[0] 
+
+#         else:
+        if(lambda_min < lambda_max):
+            result = minimize(error_function, x0=0.5, args=(prob, number_of_discounts), bounds=[(lambda_min, lambda_max)], method='L-BFGS-B')
+            lambda_estimate[i] = result.x[0]  
+            
+        
+        offered_i = np.sum(offered_hist[i, :])
+        lambda_plus[i] = lambda_estimate[i] + np.sqrt(2 * np.log(t) / offered_i)
+
+    return lambda_estimate, lambda_plus
+
+def online(budget, n, K_actual, batch, number_of_rounds):
+    K_estimate = np.random.rand(n)
+    K_estimate_plus = K_estimate.copy()
+    probabilities = np.zeros(n)
+    number_of_discounts = budget
+    
+    offered_hist = np.zeros((n, number_of_discounts + 1))
+    success_hist = np.zeros((n, number_of_discounts + 1))
+    
+    t = 0
+    cur_red = 0.0
+    best_red = 0.0
+    regret_heur = np.zeros(number_of_rounds // batch)
+    
+    C_actual = offline(budget, K_actual, n)
+    start_time = time.time()
+    while t < number_of_rounds:
+        C_estimates = offline(budget, K_estimate_plus, n)
+        if t % 1000000 == 0:
+            print()
+            print()
+            
+            print(f"  budget allocation = {C_estimates}")
+        
+        for j in range(n):
+            probabilities[j] = 1 - np.exp(-K_actual[j] * C_estimates[j])
+        
+        offered_inst = np.zeros((n, number_of_discounts + 1))
+        success_inst = np.zeros((n, number_of_discounts + 1))
+        
+        for j in range(n):
+            if C_estimates[j] != 0:
+                offered_inst[j, int(C_estimates[j])] += batch
+                success_inst[j, int(C_estimates[j])] += binom.rvs(batch, probabilities[j])
+        
+        for j in range(n):
+            if C_estimates[j] != 0:
+                offered_hist[j, int(C_estimates[j])] += offered_inst[j, int(C_estimates[j])]
+                success_hist[j, int(C_estimates[j])] += success_inst[j, int(C_estimates[j])]
+        
+        t += batch
+        K_estimate, K_estimate_plus = estimate_lambda_ls(success_hist, offered_hist, n, number_of_discounts, t)
+        
+        for j in range(n):
+            best_red += batch * (1 - np.exp(-K_actual[j] * C_actual[j]))
+        
+        cur_red += np.sum(success_inst)
+        
+        regret_heur[t // batch - 1] = best_red - cur_red
+        if t % 1000000 == 0:
+            print()
+            print(f"in the {t}th iteration")
+            print(f"  actual no : {best_red}")
+            print(f"  estimated : {cur_red}")
+            print(f"  lam = {K_estimate}")
+            print(f"  lambdaU : {K_estimate_plus}")
+            print(f"time take {time.time()-start_time}")
+            start_time = time.time()
+    
+    return K_estimate, regret_heur, best_red, cur_red
+
+# Test script
+
+def main():
+    colors = ['r', 'g', 'b']
+    n_values = range(4, 7)
+
+    for idx, n in enumerate(n_values):
+        print()
+        print()
+        print()
+        print(f"for agent {n}")
+        iter = 20
+        batch = 50
+        budget = 5
+        no_of_rounds = 5000000
+
+        reg1_avg = np.zeros(no_of_rounds // batch)
+
+        for i in range(iter):
+            K_actual = 0.6 * np.random.rand(n)
+            print()
+            print(f"actual lam for {i}th is {K_actual}")
+            K_est1, reg1, _, _ = online(budget, n, K_actual, batch, no_of_rounds)
+            reg1_avg += reg1
+
+        reg1_avg /= iter
+
+        plt.plot(reg1_avg, color=colors[idx], label=f'n = {n}')
+
+    plt.xlabel('Number of Batches')
+    plt.ylabel('Average Regret')
+    plt.title('Average Regret vs. Number of Batches')
+    plt.legend()
+    plt.show()
+
+if __name__ == "__main__":
+    main()
